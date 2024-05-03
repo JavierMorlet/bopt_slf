@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 
 setup(
     name='bopt_slf',
-    version='1.0.2',
+    version='1.0.3',
     description='Bayesian optimization for constrained or unconstrained, continuous, discrete or mixed data problems',
     author='Javier Morlet-Espinosa',
     author_email='a00833961@tec.mx',
