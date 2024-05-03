@@ -6,7 +6,7 @@ import numpy as np
 
 def Errors(n_x, n_y, design_type, surrogate, constraints_method, AF_name):
 
-    valid_var_type = ["continuous", "discrete", "categorical"]
+    valid_var_type = ["continuous", "integer", "categorical"]
     valid_design_type = ["random", "LHS", "Sobol", "Halton", "Mesh"]
     valid_surrogate_name = ["GP", "SGP"]
     valid_constraints_method = ["PoF", "GPC"]
@@ -39,7 +39,7 @@ def Data_eval(x, n_c, dims, enc_cat):
             ix_cat = (dims - n_c)
             x_conv.append(enc_cat[i].inverse_transform(x[:,ix_cat+i].reshape(-1,1)))
         x_conv = np.array(x_conv).reshape(-1,1)
-        x_eval = np.hstack((x[:, :ix_cat], np.asarray(x_conv,object)))
+        x_eval = np.hstack((x[:, :ix_cat], np.asarray(x_conv, object)))
     else:
         x_eval = x
     
@@ -47,12 +47,12 @@ def Data_eval(x, n_c, dims, enc_cat):
 
 # *******************************************************
 
-def Eval_fun(x, n_elements, parallelization, jobs, function):
+def Eval_fun(x, n_elements, jobs, function):
 
-    if parallelization == "no":
+    if jobs == 1:
         x_new = np.array(x).reshape(1,-1)
         z_new = function(x_new)
-    elif parallelization == "yes":
+    else:
         x_new = [x[i].reshape(1,-1) for i in range(n_elements)]
         with mp.Pool(jobs) as pool:
             z_new = pool.map(function, x_new)
@@ -72,6 +72,20 @@ def Eval_const(x, const, n_const, constraints_method):
 
 # *******************************************************
 
+def Best_values(x, z, sense):
+
+    if sense == "maximize":
+        ix_best = np.argmax(z)
+        z_best = np.max(z)
+    elif sense == "minimize":
+        ix_best = np.argmin(z)
+        z_best = np.min(z)
+    x_best = x[ix_best]
+
+    return x_best, z_best
+
+# *******************************************************
+
 def Regret(z_true, x, n_elements, model):
     # Return an average of the reward
     z_pred, _ = model.predict(x)
@@ -82,12 +96,31 @@ def Regret(z_true, x, n_elements, model):
 
 # *******************************************************
 
-def Print_results(x, enc_cat):
+def Print_header(names, x_symb_names, dims):
+
+    if names is None:
+        header = 'ite  ' +  '  f      ' + str(x_symb_names[0])
+    else:
+        header = 'ite  ' +  '  f      ' + str(names[0])
+    for i in range(1, dims):
+        if names is None:
+            header += '      ' + str(x_symb_names[i])
+        else:
+            header += '      ' + str(names[i])
+    
+    return header
+
+# *******************************************************
+
+def Print_results(x, z, n_c, dims, enc_cat):
+
+    x_eval = Data_eval(x.reshape(1,-1), n_c, dims, enc_cat)
 
     if enc_cat is None:
-        x = x.reshape(-1)
+        x = x_eval.reshape(-1)
         x_print = ["%.5f" % value if 1e-3 < abs(value) < 1e3 else "%0.1e" % value for value in x]
     else:
+        x = x_eval
         x = x[0]
         x_print = [] 
         for value in x:
@@ -98,8 +131,10 @@ def Print_results(x, enc_cat):
                     x_print.append("%.5f" % value)
                 else:
                     x_print.append("%0.1e" % value)
+    
+    z_print = "%.5f" % z if 1e-3 < abs(z) < 1e3 else "%0.1e" % z
         
-    return x_print
+    return x_print, z_print
 
 # *******************************************************
 

@@ -33,12 +33,10 @@ def Querry(x, x_matrix, n_elements, bounds, dims, af_params, constraints_method,
                 var = np.var(matrix[i]/np.sqrt(len(matrix[i])), axis=0)
                 if var == 0:
                     Sigma.append(1e-6)
-                    P.append(1/(1e-6))
                     chi.append(1.4)
                 else:
                     Sigma.append(var)
                     var_inv = 1/var
-                    P.append(var_inv)
                     y = matrix[i] - mu[i]
                     dist = [(y[j]*np.sqrt(var_inv)) for j in range(len(y))]
                     chi.append(np.percentile(dist, 95))
@@ -47,12 +45,11 @@ def Querry(x, x_matrix, n_elements, bounds, dims, af_params, constraints_method,
                 if (len(matrix[i]) < 3):
                     cov = np.eye(dims)
                     Sigma.append(cov)
-                    P.append(cov)
                     chi.append(1.4)
                 else:
                     # Covariance matrix
                     cov = np.cov(matrix[i].T)
-                    # Check if the covariance matrix is singular, if so, add a small value to the diagonal
+                    # Check if the covariance matrix is singular. If so, add a small value to the diagonal
                     if np.linalg.det(cov) == 0:
                         cov = cov + 1e-6*np.eye(dims)
                         # Inverse of the covariance matrix
@@ -60,12 +57,17 @@ def Querry(x, x_matrix, n_elements, bounds, dims, af_params, constraints_method,
                     y = matrix[i]-mu[i].T
                     dist = [np.sqrt(y[j].T@cov_inv@y[j]) for j in range(len(y))]
                     Sigma.append(cov_inv)
-                    P.append(cov)
                     chi.append(np.percentile(dist, 95))
 
-        return mu, Sigma, P, chi
+        return mu, Sigma, chi
 
     def Constrains(x, n_elements, mu, P, chi):
+
+        # lambda function for the constrains
+        def Constraint_lambify(fun):
+
+            lam = lambda x: fun(*x)
+            return lam
 
         const = []
 
@@ -75,12 +77,6 @@ def Querry(x, x_matrix, n_elements, bounds, dims, af_params, constraints_method,
             const.append(sp.LessThan(dist[0], chi[i]))
             
         const_lamb = [sp.lambdify(x, (const[i].rhs - const[i].lhs), 'numpy') for i in range(n_elements)]
-        # lambda function for the constrains
-        def Constraint_lambify(fun):
-
-            lam = lambda x: fun(*x)
-            return lam
-
         constraints = [Constraint_lambify(const_lamb[i]) for i in range(n_elements)]
         
         return constraints
@@ -90,13 +86,13 @@ def Querry(x, x_matrix, n_elements, bounds, dims, af_params, constraints_method,
     if x_matrix is None:
         raise ValueError('Initial database is empty')
     # Compute the confidence region
-    mu, Sigma, P, chi = Mahalanobis_distance(x_matrix, n_elements)
+    mu, Sigma, chi = Mahalanobis_distance(x_matrix, n_elements)
     # Define the constrains
     constraints = Constrains(x, n_elements, mu, Sigma, chi)
     # Define the optimization problem
     x_opt = []
     for i in range(n_elements):
         res = minimize(Acquisition_function_opt, x0=mu[i], args=(af_params, sense, model, models_const), method='SLSQP', bounds=bounds, constraints={'type': 'ineq', 'fun': constraints[i]})
-        x_opt.append(res.x)        
+        x_opt.append(res.x)
 
     return x_opt

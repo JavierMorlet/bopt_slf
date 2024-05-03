@@ -1,10 +1,14 @@
 # *******************************************************
 # Import libraries
 
+import time
 import numpy as np
+import multiprocess as mp
 from scipy.stats import qmc
 from sklearn.preprocessing import OrdinalEncoder
-import time
+from GPy.kern import RBF
+from ..utils.Aux import Data_eval
+from ..utils.Models import Kernel_discovery
 
 # *******************************************************
 
@@ -34,7 +38,7 @@ def Space(domain):
             n_x += 1
             x_l.append(domain[i]['domain'][0])
             x_u.append(domain[i]['domain'][1])
-        elif domain[i]['type'] == "discrete":
+        elif domain[i]['type'] == "integer":
             n_d += 1
             dis_val.append(domain[i]['domain'])
         elif domain[i]['type'] == "categorical":
@@ -88,59 +92,24 @@ def Get_constraints(constraints, constraints_method):
 
     "Transforms tuple of constraints into list"
 
-    n_const = len(constraints)
-
-    if constraints_method == "PoF":
-        symbols = ['<=', '>=']
-        const = []
-        for i in range(n_const):
-            for s in symbols:
-                try:
-                    index_const = constraints[i]['constraint'].index(s)
-                    const.append(constraints[i]['constraint'][:index_const-1])
-                except:
-                    pass
-    elif constraints_method == "GPC":
-        const = constraints
+    if constraints is None:
+        const, n_const = None, None
+    else:
+        n_const = len(constraints)
+        if constraints_method == "PoF":
+            symbols = ['<=', '>=']
+            const = []
+            for i in range(n_const):
+                for s in symbols:
+                    try:
+                        index_const = constraints[i]['constraint'].index(s)
+                        const.append(constraints[i]['constraint'][:index_const-1])
+                    except:
+                        pass
+        elif constraints_method == "GPC":
+            const = constraints
     
     return const, n_const
-
-# *******************************************************
-
-def Times_fun(fun, x):
-
-    """ 
-    Generates the number of points of the mesh or grid, depending on the cost of the evaluation of the function, and the dimensions of the problem
-    """
-    
-    start = time.time()
-    f_eval = fun(x.reshape(1,-1))
-    end = time.time()
-    
-    return (end - start), f_eval
-
-# *******************************************************
-
-def Points_initial_design(times, dims, design, c_param = 50):
-
-    if times <= 1:
-        exp_param = 0.25
-    else: 
-        exp_param = 0.95
-    
-    points_D = int(c_param - c_param/(1+(1/times)**exp_param))
-
-    if design == "Mesh":
-        points_D = int(np.ceil(points_D)**(1/dims))
-    elif design == "Sobol":
-        points_D = int(np.ceil(np.sqrt(points_D))**2)
-    else:
-        pass
-
-    if points_D < 3:
-        points_D = int(3)
-
-    return points_D
 
 # *******************************************************
 
@@ -174,7 +143,7 @@ def x_Generator(x_l, x_u, y_v, n_x, n_y, dims, points, problem_type, design_type
             y_l, y_u, flag = Bounds_y(y_v, n_y)
 
             if flag == 1:
-                y_rand = np.random.randint(y_l, y_u, size=(points, dims))
+                y_rand = np.random.randint(y_l, y_u, size=(points, n_y))
             elif flag == 0:
                 size_y = [len(y_v[i]) for i in range(n_y)]
                 l = [np.repeat(1/size_y[i], size_y[i]) for i in range(n_y)]
@@ -192,7 +161,7 @@ def x_Generator(x_l, x_u, y_v, n_x, n_y, dims, points, problem_type, design_type
             y_variables = Y_rand(y_v, n_y, points)
             variables = np.hstack((x_variables, y_variables))
         elif problem_type == "Discrete":
-            variables = Y_rand(y_v, dims, points)[0]
+            variables = Y_rand(y_v, dims, points)
         else:
             pass
 
@@ -337,7 +306,6 @@ def x_Generator(x_l, x_u, y_v, n_x, n_y, dims, points, problem_type, design_type
     elif design_type == "LHS":
         variables = QMC_design(x_l, x_u, y_v, n_x, n_y, dims, points, problem_type, "LHS")
     elif design_type == "Sobol":
-        points = int(np.ceil(np.sqrt(points))**2)
         variables = QMC_design(x_l, x_u, y_v, n_x, n_y, dims, points, problem_type, "Sobol")
     elif design_type == "Halton":
         variables = QMC_design(x_l, x_u, y_v, n_x, n_y, dims, points, problem_type, "Halton")
@@ -348,6 +316,71 @@ def x_Generator(x_l, x_u, y_v, n_x, n_y, dims, points, problem_type, design_type
     
     return variables
 
+# ******************************************************* 
+
+def Get_x_and_z(fun, x_0, z_0, x_l, x_u, y_v, n_x, n_y, n_c, dims, enc_cat, p_design, design, problem_type):
+
+# *************************
+
+    def Times_fun(fun, x):
+
+        """ 
+        Generates the number of points of the mesh or grid, depending on the cost of the evaluation of the function, and the dimensions of the problem
+        """
+        
+        start = time.time()
+        f_eval = fun(x.reshape(1,-1))
+        end = time.time()
+        
+        return (end - start), f_eval
+
+# *************************
+
+    def Points_initial_design(times, dims, design, c_param = 50):
+
+        """ 
+        Generates the number of initial points of the design
+        """
+
+        if times <= 1:
+            exp_param = 0.25
+        else: 
+            exp_param = 0.95
+        points_D = int(c_param - c_param/(1+(1/times)**exp_param))
+        # Adjust points if design is Mesh or Sobol. 
+        if design == "Mesh":
+            points_D = int(np.ceil(points_D)**(1/dims))
+        elif design == "Sobol":
+            points_D = int(np.ceil(np.sqrt(points_D))**2)
+        else:
+            pass
+        if points_D < 3:
+            points_D = int(3)
+
+        return points_D
+    
+    if x_0 is None:
+        # Evaluate an arbitrary point to determine the computation time of the function
+        x_trial = x_Generator(x_l, x_u, y_v, n_x, n_y, dims, 1, problem_type, "random")
+        x_eval = Data_eval(x_trial, n_c, dims, enc_cat)
+        times, z_trial = Times_fun(fun, x_eval)
+        if p_design == None:
+            p_design = Points_initial_design(times, dims, design)
+        x_0 = x_Generator(x_l, x_u, y_v, n_x, n_y, dims, p_design, problem_type, design)
+        x_eval = Data_eval(x_0, n_c, dims, enc_cat)
+        z_0 = fun(x_eval).reshape(-1,1)
+        x, z = np.vstack((x_0, x_trial)), np.vstack((z_0, z_trial))
+    else:
+        x = x_0
+        if z_0 is None:
+            x_eval = Data_eval(x_0, n_c, dims, enc_cat)
+            z = fun(x_eval).reshape(-1,1)
+        else:
+            p_design = len(z_0)
+            z = z_0
+    
+    return x, z
+
 # *******************************************************
 
 def Bounds(x_l, x_u, dims):
@@ -357,17 +390,55 @@ def Bounds(x_l, x_u, dims):
 
 # *******************************************************
 
-def Points_mesh(dims, r1=9):
+def Get_kernel(x_red, z, dims_red, kern_discovery, kern_discovery_evals, surrogate, kernel):
+
+    if kern_discovery == "yes":
+        model = Kernel_discovery(x_red, z, dims_red, surrogate, kern_discovery_evals)
+        kernel_ = model.kern
+    elif kern_discovery == "no" and kernel is None:
+        kernel_ = RBF(input_dim=dims_red, variance=1.0, lengthscale=1.0)
+    else:
+        kernel_ = kernel
+
+    return kernel_
+
+# *******************************************************
+
+def Points_mesh(dims, r1=10):
 
     """ 
     Generates the points mesh
     """
-    points = int(np.ceil(2**r1)**(1/dims))
-
+    points = int(np.ceil(2**(r1/dims)))
     if points < 3:
         points = 3
 
     return points
+
+# *******************************************************
+
+def Percentile_q(max_iter):
+
+    q0 = 25
+    qf = 75
+    delta_q = (qf-q0)/max_iter
+    q_inc = q0
+    q = q0
+
+    return q, q_inc, delta_q
+
+# *******************************************************
+
+def Num_jobs(n_jobs):
+
+    if n_jobs == -1:
+        jobs = mp.cpu_count()
+    elif n_jobs == None:
+        jobs = 1
+    else:
+        jobs = n_jobs
+    
+    return jobs
 
 # *******************************************************
 

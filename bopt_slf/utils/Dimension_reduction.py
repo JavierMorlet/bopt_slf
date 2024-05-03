@@ -207,13 +207,23 @@ def Find_inverter(data, data_reduced, n_x, n_y, dims, problem_type):
 
 # *******************************************************
 
-def Red_bounds(mesh, x_l, x_u, n_x, dims, dims_red, problem_type, reducer):
+def Red_bounds(x_l, x_u, y_v, n_x, n_y, dims, dims_red, problem_type, reducer):
 
     if reducer is None:
         x_l_red = x_l
         x_u_red = x_u
     else:
-        x_mesh_red = Reduce(mesh, n_x, dims, problem_type, reducer)
+        if problem_type == "Continuous":
+            lists = [[x_l[i], x_u[i]] for i in range(dims)]
+        elif problem_type == "Mixed":
+            lists_x = [[x_l[i], x_u[i]] for i in range(n_x)]
+            lists_y = [[y_v[i][0], y_v[i][-1]] for i in range(n_y)]
+            lists = np.vstack((lists_x, lists_y)).tolist()
+        elif problem_type == "Discrete":
+            lists = [[y_v[i][0], y_v[i][-1]] for i in range(dims)]
+        mesh = np.meshgrid(*lists)
+        x_mesh = np.array(mesh).T.reshape(-1, dims)
+        x_mesh_red = Reduce(x_mesh, n_x, dims, problem_type, reducer)
         x_l_red = np.array([x_mesh_red[0,i] for i in range(dims_red)])
         x_u_red = np.array([x_mesh_red[-1,i] for i in range(dims_red)])
 

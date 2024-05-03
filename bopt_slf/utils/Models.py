@@ -15,7 +15,7 @@ def Select_model(x, z, kernel, surrogate):
     elif surrogate == "SGP":
         model = GPy.models.SparseGPRegression(x, z, kernel)
     else:
-        raise ValueError('Not valid surrogate model')
+        pass
     
     return model
 

@@ -1,5 +1,4 @@
-# Create class for the querry points using Gaussian Process, UCB and Set-level filtration
-# Each querry point is a connected component of the matrix of points x in the domain adove the level set
+# Find connected component of the matrix of points x in the domain adove the level set
 
 # *******************************************************
 # Import libraries
@@ -24,7 +23,7 @@ def Slf(mesh, p_mesh, dims, q0, jobs, af_params, constraints_method, sense, mode
 
         return data_matrix.astype(int), x.reshape(*[p_x]*dims, dims)
 
-    def Find_connected_elements(nodes, matrix):
+    def Find_connected_elements_dfs(nodes, matrix):
         # Number of dimensions
         D = [nodes.shape[i] for i in range(dims)]
         D0 = D[0]
@@ -74,7 +73,7 @@ def Slf(mesh, p_mesh, dims, q0, jobs, af_params, constraints_method, sense, mode
         #
         for j in range(n_elements):
             x_flitred = Filtration(x[j], score[j], p_x[j], dims, level, sense)
-            connected_elements.append(Find_connected_elements(x_flitred[0], x_flitred[1])) 
+            connected_elements.append(Find_connected_elements_dfs(x_flitred[0], x_flitred[1])) 
 
         connected_elements = [x for x in connected_elements if x != []]
         connected_elements = Flatten(connected_elements)
@@ -94,48 +93,43 @@ def Slf(mesh, p_mesh, dims, q0, jobs, af_params, constraints_method, sense, mode
         scores_mean = []
 
         for i in range(n_elements):
-            #connected_elements[0]
             scores_lst.append(np.array([Replace_val(x[i][j], mesh_all, score_all) for j in range(len(x[i]))]))
 
         for i in range(n_elements):
             if len(scores_lst[i].shape) == 1:
                 scores_mean.append(np.mean([np.mean(scores_lst[i][j]) for j in range(len(scores_lst[i]))]))
-                #for j in range(len(scores_lst[i])):
-                #    scores_mean.append(np.mean(scores_lst[i][j]))
             else:
                 scores_mean.append(np.mean(scores_lst[i]))
-            #except:
-            #    print(scores_lst)
-            #    print('Todo: Broadcast error with numpy mean function to be solved')
                 
         if sense == "maximize":
             sorted = np.sort(scores_mean)[::-1][:jobs]
         elif sense == "minimize":
             sorted = np.sort(scores_mean)[:jobs]
         l = np.array([np.where(scores_mean == sorted[i]) for i in range(len(sorted))]).reshape(-1)
+        #print(l)
+        try:
+            l = Flatten(l)
+            l = list(set(l))
+        except:
+            l = l
         connected_elements = [x[i] for i in l]
         n_connected_elements = len(connected_elements)
 
         return connected_elements, n_connected_elements
     
+    # Main
     score = [Acq_fun(mesh[i], af_params, constraints_method, model, models_const) for i in range(len(mesh))]
     n_elements = len(mesh)
-    q_D = []
-    flag = 0
-    
-    for q in range(q0, 0, -5):
-        if sense == "maximize":
-            connected_elements, n_connected_elements = List_of_elements(mesh, score, p_mesh, n_elements, dims, q, sense)
-            q_D.append([q, connected_elements, n_connected_elements])
-        elif sense == "minimize":
-            connected_elements, n_connected_elements = List_of_elements(mesh, score, p_mesh, n_elements, dims, 100-q, sense)
-            q_D.append([100-q, connected_elements, n_connected_elements])
-        if n_connected_elements < jobs:
-            flag = 1
-            break
-
-    if flag == 0:
-        q, connected_elements, n_connected_elements = q_D[0][0], q_D[0][1], q_D[0][2]
+    # 
+    if sense == "maximize":
+        connected_elements, n_connected_elements = List_of_elements(mesh, score, p_mesh, n_elements, dims, q0, sense)
+    elif sense == "minimize":
+        connected_elements, n_connected_elements = List_of_elements(mesh, score, p_mesh, n_elements, dims, 100-q0, sense)
+    else:
+        pass
+    #  
+    if n_connected_elements > jobs:
         connected_elements, n_connected_elements = Reduce_num_elements(connected_elements, mesh, score, n_connected_elements, jobs, sense)
+        
 
     return connected_elements, n_connected_elements
