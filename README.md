@@ -1,8 +1,10 @@
 # bopt-slf
 
-A Bayesian optimization library. It features a set level filtration and kernel learning. 
+A Bayesian optimization library with level partitioning. 
 
 ![Superlevel set filtration](docsrc/Slf.png)
+
+The library incorporates superlevel set  ltration for space partitioning, automatic covariance selection, a framework for working with constraint functions in case the optimization problem requires it, as well as the ability to work with continuous and/or discrete variables. 
 
 For tutorial notebooks, check out the examples folder.
 
@@ -179,7 +181,7 @@ The library parameters are:
   </ul>
 </ul>
 
-## Returns
+## Returns
 
 optimize() returns a dict with:
 
