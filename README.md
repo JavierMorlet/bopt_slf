@@ -2,6 +2,8 @@
 
 A Bayesian optimization library. It features a set level filtration and kernel learning. 
 
+![Superlevel set filtration](docsrc/Slf.png)
+
 For tutorial notebooks, check out the examples folder.
 
 ## Getting started
@@ -12,10 +14,10 @@ For tutorial notebooks, check out the examples folder.
 pip install bopt-slf
 ````
 
-**
+**Notebook tutorials**
 
 Read the [basic notebook](https://github.com/JavierMorlet/bopt_slf/blob/main/examples/Basic_tour.ipynb)
-for an  introduction to the library.
+for an introduction to the basic concepts of the library.
 
 For more details please refer to the [advaned tour notebook](https://github.com/JavierMorlet/bopt_slf/blob/main/examples/Advanced_tour.ipynb)
 
@@ -36,6 +38,28 @@ For more details please refer to the [advaned tour notebook](https://github.com/
 ## Library parameters
 
 The library parameters are:
+
+### Required arguments
+
+<ul>
+  <li>function :</li>
+  <ul>
+    <li>Python function with one output</li>
+    <li>Cost or objective function</li>
+  </ul>
+  <li>domain :</li>
+  <ul>
+    <li>List</li>
+    <li>The kind and bounds of each of the variables. The valid kinds are {'continuous', 'integer', 'categorical'}</li>
+  </ul>
+  <li>sense :</li>
+  <ul>
+    <li>{'maximize', 'minimize'}</li>
+    <li>Specifies whether to minimize or maximize the objective function</li>
+  </ul>
+<ul>
+
+### Default Arguments
 
 <ul>
   <li>surrogate :</li>
@@ -153,4 +177,29 @@ The library parameters are:
     <li>{0, 1}, default 0</li>
     <li>Enable verbose output.</li>
   </ul>
+</ul>
+
+## Returns
+
+optimize() returns a dict with:
+
+<ul>
+  <li>x_best : The values ​​of the variables that yield the best value of objective function</li>
+  <li>f_best : The best value ​​of the objective function</li>
+  <li>x_init : The initial sampling points to evaluate the objective function</li>
+  <li>f_init : The value of the objective function at the initial sampling points</li>
+  <li>x_iters : The new points suggested during the progress of the algorithm.</li>
+  <li>f_iters : The value of the objective function at the new suggested points.</li>
+  <li>x_l : Lower bounds of the variables.</li>
+  <li>x_u : Upper bounds of the variables.</li>
+  <li>dims : Dimensions of the optimization problem.</li>
+  <li>iters : Maximum number of iterations within the algorithm.</li>
+  <li>initial_design : Initial design strategy for the initial sampling points.</li>
+  <li>initial_points : Number of points of the initial sampling points matrix.</li>
+  <li>acquisition_function : Acquisition function employed during the algorithm.</li>
+  <li>xi : Last value of the acquisition function hyperparameter.</li>
+  <li>regret : Metric to asses the performance of the algorithm.</li>
+  <li>constraint_method : Stategy used to handle the constraint functions.</li>
+  <li>models_constraints : Surrogate model for the constraint functions.</li>
+  <li>model : Surrogate model for the objective function.</li>
 </ul>
