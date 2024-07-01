@@ -1,32 +1,36 @@
 # *******************************************************
-# Import libraries
+# ****** Import libraries ******
+# *******************************************************
 
 import time
+import warnings
 import numpy as np
+import sympy as sp
 import multiprocess as mp
 from scipy.stats import qmc
-from sklearn.preprocessing import OrdinalEncoder
+from scipy.stats import chi2
 from GPy.kern import RBF
-from ..utils.Aux import Data_eval
+from ..utils.Preprocessing_data import U_scaling, U_inverse_scaling, Train_reducer, Train_inverter, Find_reducer, Find_inverter, Reduce
 from ..utils.Models import Kernel_discovery
 
+# *******************************************************
+# ****** Space ******
 # *******************************************************
 
 def Space(domain):
 
     """ 
-    Gets an array for the lower and upper bounds of the continuous variables, and a tuple for the discrete variables.
+    Gets tuple of dimension of the problem, lower and upper bounds of the continuous variables, values for the discrete variables, and names of the variables.
     """
 
     dims = len(domain)
-    n_x = 0
-    n_d = 0
-    n_c = 0
+    d_nc = 0
+    d_ni = 0
+    d_nq = 0
     x_l = []
     x_u = []
-    dis_val = []
+    int_val = []
     cat_val = []
-    enc_cat = []
     names = []
 
     for i in range(dims):
@@ -35,38 +39,35 @@ def Space(domain):
         except:
             names = 0
         if domain[i]['type'] == "continuous":
-            n_x += 1
+            d_nc += 1
             x_l.append(domain[i]['domain'][0])
             x_u.append(domain[i]['domain'][1])
         elif domain[i]['type'] == "integer":
-            n_d += 1
-            dis_val.append(domain[i]['domain'])
+            d_ni += 1
+            int_val.append(domain[i]['domain'])
         elif domain[i]['type'] == "categorical":
-            n_c += 1
-            enc_cat.append(OrdinalEncoder())
-            X = domain[i]['domain']
-            X = [[(X[i])] for i in range(len(X))]
-            X_trans = tuple(enc_cat[n_c-1].fit_transform(X).reshape(-1).astype(int))
-            cat_val.append(X_trans)
+            d_nq += 1
+            features = domain[i]['domain']
+            cat_val.append(features)
         else:
             pass
             
     x_l, x_u = np.array(x_l), np.array(x_u)
-    n_y = n_d + n_c
-    y_v = [item for sublist in [dis_val, cat_val] for item in sublist]
-    if n_d == 0:
-        dis_val = 0
-    if n_c == 0:
-        enc_cat = None
+    d_nd = d_ni + d_nq
+    if d_nd == 0:
+        int_val = 0
+    if d_nq == 0:
         cat_val = 0
     if names == 0:
         names = None
 
-    return dims, n_x, n_d, n_c, n_y, x_l, x_u, y_v, dis_val, cat_val, enc_cat, names
+    return dims, d_nc, d_ni, d_nq, d_nd, x_l, x_u, int_val, cat_val, names
 
 # *******************************************************
+# ****** Problem_type ******
+# *******************************************************
 
-def Problem_type(n_x, n_y):
+def Problem_type(d_nc, d_ni, d_nq):
 
     """ 
     Returns the type of problem depending of the characteristics of the inputs:
@@ -75,22 +76,256 @@ def Problem_type(n_x, n_y):
     * Mixed if there are continuous and discrete variables
     """
     
-    if n_x > 0 and n_y == 0:
+    if d_nc > 0 and d_ni == 0 and d_nq == 0:
         problem_type = "Continuous"
-    elif n_y > 0 and n_x == 0:
+    elif d_nc == 0 and d_ni > 0 and d_nq == 0:
         problem_type = "Discrete"
-    elif n_x > 0 and n_y > 0:
-        problem_type = "Mixed"
+    elif d_nc == 0 and d_ni == 0 and d_nq > 0:
+        problem_type = "Categorical"
+    elif d_nc > 0 and d_ni > 0 and d_nq == 0:
+        problem_type = "Mixed_integer"
+    elif d_nc > 0 and d_ni == 0 and d_nq > 0:
+        problem_type = "Mixed_categorical"
+    elif d_nc == 0 and d_ni > 0 and d_nq > 0:
+        problem_type = "Mixed_discrete"
+    elif d_nc > 0 and d_ni > 0 and d_nq > 0:
+        problem_type = "Mixed_all"
     else:
         pass
 
     return problem_type
 
 # *******************************************************
+# ****** Get_constraints ******
+# *******************************************************
 
 def Get_constraints(constraints, constraints_method):
 
-    "Transforms tuple of constraints into list"
+    "Transforms tuple of constraints into lists"
+
+    if constraints is None:
+        const, d_nqonst = None, None
+    else:
+        d_nqonst = len(constraints)
+        if constraints_method == "PoF":
+            symbols = ['<=', '>=']
+            const = []
+            for i in range(d_nqonst):
+                for s in symbols:
+                    try:
+                        index_const = constraints[i]['constraint'].index(s)
+                        const.append(constraints[i]['constraint'][:index_const-1])
+                    except:
+                        pass
+        elif constraints_method == "GPC":
+            const = constraints
+    
+    return const, d_nqonst
+
+# *******************************************************
+# ****** Get_p_design ******
+# *******************************************************
+
+def Get_n_p_design(fun, d_nc, d_ni, d_nq, x_l, x_u, int_val, cat_val, c1_param, problem_type, design, n_p_design):
+
+    """
+    Computes the number of points of the initial design
+    """
+
+    # *************************
+        # x0_trial
+    # *************************
+
+    def x0_trial(x_l, x_u, int_val, cat_val, d_nc, d_ni, d_nq, problem_type):
+    
+        """ 
+        Perform a single random sampling of inputs
+        """    
+
+        # x_c0_rand
+        def x_c0_rand(x_l, x_u, d_nc):
+
+            return np.random.uniform(x_l, x_u, size=(d_nc))
+        
+        # x_c0_rand
+        def x_d0_rand(disc_val, d_ni):
+
+            return np.array([np.random.choice(disc_val[i]) for i in range(d_ni)])
+        
+        # Main program
+        if problem_type == "Continuous":
+            var = x_c0_rand(x_l, x_u, d_nc)
+        elif problem_type == "Discrete":
+            var = x_d0_rand(int_val, d_ni)
+        elif problem_type == "Categorical":
+            var = x_d0_rand(cat_val, d_nq)
+        elif problem_type == "Mixed_integer":
+            xc_var = x_c0_rand(x_l, x_u, d_nc)
+            xi_var = x_d0_rand(int_val, d_ni)
+            var = np.hstack((xc_var, xi_var))
+        elif problem_type == "Mixed_categorical":
+            xc_var = x_c0_rand(x_l, x_u, d_nc)
+            xq_var = x_d0_rand(cat_val, d_nq)
+            var = np.hstack((xc_var, xq_var.astype(object)))
+        elif problem_type == "Mixed_discrete":
+            xi_var = x_d0_rand(int_val, d_ni)
+            xq_var = x_d0_rand(cat_val, d_nq)
+            var = np.hstack((xi_var, xq_var.astype(object)))
+        elif problem_type == "Mixed_all":
+            xc_var = x_c0_rand(x_l, x_u, d_nc)
+            xi_var = x_d0_rand(int_val, d_ni)
+            xq_var = x_d0_rand(cat_val, d_nq)
+            var = np.hstack((xc_var, xi_var, xq_var.astype(object)))
+        else:
+            pass
+
+        return var
+
+    # *************************
+        # Times_fun
+    # *************************
+
+    def Times_fun(fun, x):
+
+        """ 
+        Determines the computing time for a random evaluation (x0_trial) of the objective function
+        """
+        
+        start = time.time()
+        f_eval = fun(x.reshape(1,-1))
+        end = time.time()
+        
+        return (end - start), f_eval
+
+    # *************************
+        # Points_initial_design
+    # *************************
+
+    def Points_initial_design(times, design, c1_param):
+
+        """
+        Generates the number of points depending on the cost of the evaluation of the function
+        """
+
+        if times <= 1:
+            exp_param = 0.25
+        else: 
+            exp_param = 0.95
+        points_D = int(c1_param - c1_param/(1+(1/times)**exp_param))
+        # Adjust points if design is Sobol. 
+        if design == "Sobol":
+            points_D = int(np.ceil(np.sqrt(points_D))**2)
+        else:
+            pass
+        # Adjust points if number is below 3.
+        if points_D < 3:
+            points_D = int(3)
+
+        return points_D
+
+    # *************************
+        # Main program
+    # *************************
+
+    x_trial = x0_trial(x_l, x_u, int_val, cat_val, d_nc, d_ni, d_nq, problem_type)
+    times, f_trial = Times_fun(fun, x_trial)
+
+    if n_p_design == None:
+        n_p_design = Points_initial_design(times, design, c1_param)
+    else:
+        x_trial, f_trial = None, None
+
+    return n_p_design, x_trial, f_trial
+
+# *******************************************************
+# ****** U_Generator ******
+# *******************************************************
+
+def U_Generator(dims, points, design_type):
+
+    """ 
+    Computes unitary design matrix
+    """
+
+    # *************************
+    # Random_design
+    # *************************
+
+    def Random_design(dims, points):
+
+        return np.random.rand(points, dims)
+    
+    # *************************
+    # QMC_design
+    # *************************
+
+    def QMC_design(dims, points, design_type):
+        
+        # Main program
+        if design_type == "LHS":
+            method = qmc.LatinHypercube(d=dims)
+        elif design_type == "Sobol":
+            method = qmc.Sobol(d=dims)
+        elif design_type == "Halton":
+            method = qmc.Halton(d=dims)
+        else:
+            pass
+
+        return method.random(n=points)
+
+    # *************************
+    # Main program
+    # *************************
+    
+    if design_type == "random":
+        variables = Random_design(dims, points)
+    elif design_type == "LHS" or design_type == "Sobol" or design_type == "Halton":
+        variables = QMC_design(dims, points, design_type)
+    else:
+        pass
+    
+    return variables
+
+# *******************************************************
+# ****** Get_x_and_z ******
+# *******************************************************
+
+def Get_x_and_z(fun, x_0, f_0, dims, d_nc, d_ni, d_nq, x_l, x_u, int_val, cat_val, c1_param, problem_type, design_type, n_p_design):
+
+    """ 
+    Gets the training data in the problem bounds
+    """
+
+    if x_0 is None:
+        if n_p_design is None:
+            n_p_design, x_trial, f_trial = Get_n_p_design(fun, d_nc, d_ni, d_nq, x_l, x_u, int_val, cat_val, c1_param, problem_type, design_type, n_p_design)
+            U = U_Generator(dims, n_p_design, design_type)
+            x_0 = U_scaling(U, d_nc, d_ni, d_nq, x_l, x_u, int_val, cat_val, n_p_design, problem_type)
+            f_0 = fun(x_0).reshape(-1,1)
+            x, f = np.vstack((x_0, x_trial)), np.vstack((f_0, f_trial))
+        else:
+            U = U_Generator(dims, n_p_design, design_type)
+            x = U_scaling(U, d_nc, d_ni, d_nq, x_l, x_u, int_val, cat_val, n_p_design, problem_type)
+            f = fun(x).reshape(-1,1)
+    else: 
+        x = x_0
+        if f_0 is None:
+            f = fun(x).reshape(-1,1)
+        else:
+            f = f_0
+        n_p_design = len(f)
+
+    return x, f, n_p_design
+
+# *******************************************************
+# ****** Get_constraints ******
+# *******************************************************
+
+def Get_constraints(constraints, constraints_method):
+
+    """ 
+    Transforms tuple of constraints into list
+    """
 
     if constraints is None:
         const, n_const = None, None
@@ -102,8 +337,12 @@ def Get_constraints(constraints, constraints_method):
             for i in range(n_const):
                 for s in symbols:
                     try:
-                        index_const = constraints[i]['constraint'].index(s)
-                        const.append(constraints[i]['constraint'][:index_const-1])
+                        if s == '<=':
+                            index_const = constraints[i]['constraint'].index(s)
+                            const.append(constraints[i]['constraint'][:index_const-1])
+                        elif s == '>=':
+                            index_const = constraints[i]['constraint'].index(s)
+                            const.append(-constraints[i]['constraint'][:index_const-1])
                     except:
                         pass
         elif constraints_method == "GPC":
@@ -112,275 +351,93 @@ def Get_constraints(constraints, constraints_method):
     return const, n_const
 
 # *******************************************************
+# ****** Get_search_space_params ******
+# *******************************************************
 
-def x_Generator(x_l, x_u, y_v, n_x, n_y, dims, points, problem_type, design_type):
+def Get_search_space_params(x, dims, d_nc, d_ni, d_nq, d_nd, x_l, x_u, int_val, cat_val, points, problem_type, reducer, inverter_transform):
 
-    def Random_design(x_l, x_u, y_v, n_x, n_y, dims, points, problem_type):
+    """ 
+    Return the parameters for the search space of the new points:
+    * If dimension reduction is performed, it returns the training set in the reduced space and the trained reduction method. 
+    """
 
-        def Bounds_y(y_v, n_y):
-
-            y_l = []
-            y_u = []
-            flag = int(all([(np.diff(y_v[i]) == 1).all() for i in range(n_y)]))
-            
-            for i in range(n_y):
-                if flag == 1:
-                    y_l.append(y_v[i][0])
-                    y_u.append(y_v[i][-1]+1)
-                elif flag == 0:
-                    y_l.append(0)
-                    y_u.append(1)
-                else:
-                    pass
-            return y_l, y_u, flag
-
-        def X_rand(x_l, x_u, dims, points):
-
-            return np.random.uniform(x_l, x_u, size=(points, dims))
-        
-        def Y_rand(y_v, n_y, points):
-
-            y_l, y_u, flag = Bounds_y(y_v, n_y)
-
-            if flag == 1:
-                y_rand = np.random.randint(y_l, y_u, size=(points, n_y))
-            elif flag == 0:
-                size_y = [len(y_v[i]) for i in range(n_y)]
-                l = [np.repeat(1/size_y[i], size_y[i]) for i in range(n_y)]
-                sample = [np.random.choice(y_v[i], p=l[i], size=(points, 1)).reshape(-1) for i in range(n_y)]
-                y_rand = np.array(sample).T
-            else:
-                pass
-            
-            return y_rand
-
-        if problem_type == "Continuous":
-            variables = X_rand(x_l, x_u, dims, points)
-        elif problem_type == "Mixed":
-            x_variables = X_rand(x_l, x_u, n_x, points)
-            y_variables = Y_rand(y_v, n_y, points)
-            variables = np.hstack((x_variables, y_variables))
-        elif problem_type == "Discrete":
-            variables = Y_rand(y_v, dims, points)
+    if reducer == "no":
+        if dims > 6: warnings.warn('You can reach maximum depth of recursion')
+        if (problem_type == "Continuous") and (d_nc <= 5):
+            reducer_name, reducer_trained, dims_tau, x_tau = "no", None, dims, x
         else:
-            pass
-
-        return variables
-    
-    def QMC_design(x_l, x_u, y_v, n_x, n_y, dims, points, problem_type, design_type):
-
-        def Bounds_y(y_v, n_y):
-
-            y_l = []
-            y_u = []
-            flag = int(all([(np.diff(y_v[i]) == 1).all() for i in range(n_y)]))
-            
-            for i in range(n_y):
-                if flag == 1:
-                    y_l.append(y_v[i][0])
-                    y_u.append(y_v[i][-1])
-                elif flag == 0:
-                    y_l.append(0)
-                    y_u.append(1)
-                else:
-                    pass
-            return y_l, y_u, flag
-
-        def X_qmc(x_l, x_u, points, method):
-                    
-            sample = method.random(n=points)
-
-            return qmc.scale(sample, x_l, x_u)
-
-        def Y_qmc(y_v, n_y, points, method):
-
-            def Assign_y(y_v, n_y, y_norm, points):
-
-                size_y = [len(y_v[i]) for i in range(n_y)]
-                l = [[i/size_y[j] for i in range(size_y[j]+1)] for j in range(n_y)]
-                for i in range(len(l)):
-                    l[i][-1] = l[i][-1] + 0.0001
-                y_new = np.empty([points, n_y])
-
-                for i in range(n_y):
-                    for j in range(len(y_norm[:,i])):
-                        for k in range(len(l[i])-1):
-                            if l[i][k] <= y_norm[j,i] < l[i][k+1]:
-                                y_new[j,i] = y_v[i][k]
-                                break
-                
-                return y_new
-            
-            y_l, y_u, flag = Bounds_y(y_v, n_y)
-            if flag == 1:
-                y_qmc = method.integers(l_bounds=y_l, u_bounds=y_u, n=points, endpoint=True)
-            elif flag == 0:
-                y_norm = X_qmc(y_l, y_u, points, method)
-                y_qmc = Assign_y(y_v, n_y, y_norm, points)        
-
-            return y_qmc
-
-        def Select_method(design_type, dims):
-            
-            if design_type == "LHS":
-                method = qmc.LatinHypercube(d=dims)
-            elif design_type == "Sobol":
-                method = qmc.Sobol(d=dims)
-            elif design_type == "Halton":
-                method = qmc.Halton(d=dims)
-            else:
-                pass
-
-            return method
-
-        if problem_type == "Continuous":
-            method = Select_method(design_type, dims)
-            variables = X_qmc(x_l, x_u, points, method)
-        elif problem_type == "Mixed":
-            method = Select_method(design_type, n_x)
-            x_variables = X_qmc(x_l, x_u, points, method)
-            method = Select_method(design_type, n_y)
-            y_variables = Y_qmc(y_v, n_y, points, method)
-            variables = np.hstack((x_variables, y_variables))
-        elif problem_type == "Discrete":
-            method = Select_method(design_type, n_y)
-            variables = Y_qmc(y_v, n_y, points, method)
+            reducer_name, reducer_trained, dims_tau = "no", None, dims
+            x_tau = U_inverse_scaling(x, d_nc, d_ni, d_nq, x_l, x_u, int_val, cat_val, points, problem_type)
+    elif reducer is None:
+        if (problem_type == "Continuous") and (d_nc <= 5):
+            reducer_name, reducer_trained, dims_tau, x_tau = "no", None, dims, x
         else:
-            pass
+            reducer_name, reducer_trained, dims_tau = Find_reducer(x, d_nc, dims, problem_type)
+            x_tau = Reduce(x, d_nc, dims, problem_type, reducer_trained)
+    else:
+        dims_tau = reducer.n_components
+        reducer_name = reducer
+        x_tau, reducer_trained = Train_reducer(x, d_nc, dims, problem_type, dims_tau, reducer)
 
-        return variables
-    
-    def Mesh_design(x_l, x_u, y_v, n_x, n_y, dims, points, problem_type):
-
-        def X_mesh(lower_bound, upper_bound, dims, points):
-
-            lists = [np.linspace(lower_bound[i], upper_bound[i], points) for i in range(dims)]
-            mesh = np.meshgrid(*lists)
-            
-            return np.array(mesh).T.reshape(-1, dims)
-        
-        def Bounds_y(n_y):
-
-            y_l = np.zeros(n_y)
-            y_u = np.ones(n_y)
-            
-            return y_l, y_u
-
-        def Assign_y(y_v, n_y, y_norm, points):
-
-                size_y = [len(y_v[i]) for i in range(n_y)]
-                l = [[i/size_y[j] for i in range(size_y[j]+1)] for j in range(n_y)]
-                for i in range(len(l)):
-                    l[i][-1] = l[i][-1] + 0.0001
-                y_new = np.empty([points, n_y])
-                for i in range(n_y):
-                    for j in range(len(y_norm[:,i])):
-                        for k in range(len(l[i])-1):
-                            if l[i][k] <= y_norm[j,i] < l[i][k+1]:
-                                y_new[j,i] = y_v[i][k]
-                                break
-                
-                return y_new
-
-        if problem_type == "Continuous":
-            variables = X_mesh(x_l, x_u, dims, points)
-        elif problem_type == "Mixed":
-            y_l, y_u = Bounds_y(n_y)
-            all_vars = X_mesh(np.append(x_l, y_l), np.append(x_u, y_u), dims, points)
-            x_variables = all_vars[:, :n_x]
-            y_norm = all_vars[:, n_x:]
-            y_variables = Assign_y(y_v, n_y, y_norm, y_norm.shape[0])
-            variables = np.hstack((x_variables, y_variables))
-        elif problem_type == "Discrete":
-            y_l, y_u = Bounds_y(n_y)
-            y_norm = X_mesh(y_l, y_u, n_y, points)
-            variables = Assign_y(y_v, n_y, y_norm, y_norm.shape[0])
+    if inverter_transform == "yes":
+        if reducer_name.__module__ == 'prince.mca' or reducer_name.__module__ == 'prince.famd':
+            raise ValueError("Reducer module has no inverse_transform")
         else:
-            pass
-
-        return variables
-
-    # Main program
-    if design_type == "random":
-        variables = Random_design(x_l, x_u, y_v, n_x, n_y, dims, points, problem_type)
-    elif design_type == "LHS":
-        variables = QMC_design(x_l, x_u, y_v, n_x, n_y, dims, points, problem_type, "LHS")
-    elif design_type == "Sobol":
-        variables = QMC_design(x_l, x_u, y_v, n_x, n_y, dims, points, problem_type, "Sobol")
-    elif design_type == "Halton":
-        variables = QMC_design(x_l, x_u, y_v, n_x, n_y, dims, points, problem_type, "Halton")
-    elif design_type == "Mesh":
-        variables = Mesh_design(x_l, x_u, y_v, n_x, n_y, dims, points, problem_type)
+            inverter = reducer_trained
+    elif inverter_transform == "no":
+        if reducer_name == "no":
+            inverter = None
+        else:
+            inverter = Find_inverter(x, x_tau, d_nc, d_nd, dims, problem_type)
+            inverter = Train_inverter(x, x_tau, dims, inverter)
     else:
         pass
     
-    return variables
+    return x_tau, reducer_name, reducer_trained, inverter, dims_tau
 
-# ******************************************************* 
+# *******************************************************
+# ****** Get_x_mesh ******
+# *******************************************************
 
-def Get_x_and_z(fun, x_0, z_0, x_l, x_u, y_v, n_x, n_y, n_c, dims, enc_cat, p_design, design, problem_type):
+def Get_x_mesh(lower_bound, upper_bound, dims_tau, c2_param):
 
-# *************************
-
-    def Times_fun(fun, x):
-
-        """ 
-        Generates the number of points of the mesh or grid, depending on the cost of the evaluation of the function, and the dimensions of the problem
-        """
-        
-        start = time.time()
-        f_eval = fun(x.reshape(1,-1))
-        end = time.time()
-        
-        return (end - start), f_eval
-
-# *************************
-
-    def Points_initial_design(times, dims, design, c_param = 50):
-
-        """ 
-        Generates the number of initial points of the design
-        """
-
-        if times <= 1:
-            exp_param = 0.25
-        else: 
-            exp_param = 0.95
-        points_D = int(c_param - c_param/(1+(1/times)**exp_param))
-        # Adjust points if design is Mesh or Sobol. 
-        if design == "Mesh":
-            points_D = int(np.ceil(points_D)**(1/dims))
-        elif design == "Sobol":
-            points_D = int(np.ceil(np.sqrt(points_D))**2)
-        else:
-            pass
-        if points_D < 3:
-            points_D = int(3)
-
-        return points_D
+    """ 
     
-    if x_0 is None:
-        # Evaluate an arbitrary point to determine the computation time of the function
-        x_trial = x_Generator(x_l, x_u, y_v, n_x, n_y, dims, 1, problem_type, "random")
-        x_eval = Data_eval(x_trial, n_c, dims, enc_cat)
-        times, z_trial = Times_fun(fun, x_eval)
-        if p_design == None:
-            p_design = Points_initial_design(times, dims, design)
-        x_0 = x_Generator(x_l, x_u, y_v, n_x, n_y, dims, p_design, problem_type, design)
-        x_eval = Data_eval(x_0, n_c, dims, enc_cat)
-        z_0 = fun(x_eval).reshape(-1,1)
-        x, z = np.vstack((x_0, x_trial)), np.vstack((z_0, z_trial))
-    else:
-        x = x_0
-        if z_0 is None:
-            x_eval = Data_eval(x_0, n_c, dims, enc_cat)
-            z = fun(x_eval).reshape(-1,1)
-        else:
-            p_design = len(z_0)
-            z = z_0
-    
-    return x, z
+    """
+    # *************************
+    # Random_design
+    # *************************
 
+    def Points_mesh(dims, c2_param):
+
+        points = int(np.ceil(2**(c2_param/dims)))
+        if points < 3:
+            points = 3
+
+        return points
+    
+    # *************************
+    # Mesh_design
+    # *************************
+
+    def Mesh_design(lower_bound, upper_bound, dims, points):
+
+        lists = [np.linspace(lower_bound[i], upper_bound[i], points) for i in range(dims)]
+        mesh = np.meshgrid(*lists)
+        
+        return np.array(mesh).T.reshape(-1, dims)
+    
+    # *************************
+    # Main program
+    # *************************
+    
+    n_p_mesh = Points_mesh(dims_tau, c2_param)
+    x_mesh = Mesh_design(lower_bound, upper_bound, dims_tau, n_p_mesh)
+    
+    return [x_mesh], [n_p_mesh], n_p_mesh
+
+# *******************************************************
+# ****** Bounds ******
 # *******************************************************
 
 def Bounds(x_l, x_u, dims):
@@ -389,47 +446,10 @@ def Bounds(x_l, x_u, dims):
     return tuple(map(tuple, bnds))
 
 # *******************************************************
-
-def Get_kernel(x_red, z, dims_red, kern_discovery, kern_discovery_evals, surrogate, kernel):
-
-    if kern_discovery == "yes":
-        model = Kernel_discovery(x_red, z, dims_red, surrogate, kern_discovery_evals)
-        kernel_ = model.kern
-    elif kern_discovery == "no" and kernel is None:
-        kernel_ = RBF(input_dim=dims_red, variance=1.0, lengthscale=1.0)
-    else:
-        kernel_ = kernel
-
-    return kernel_
-
+# ****** Get_n_jobs ******
 # *******************************************************
 
-def Points_mesh(dims, r1=10):
-
-    """ 
-    Generates the points mesh
-    """
-    points = int(np.ceil(2**(r1/dims)))
-    if points < 3:
-        points = 3
-
-    return points
-
-# *******************************************************
-
-def Percentile_q(max_iter):
-
-    q0 = 25
-    qf = 75
-    delta_q = (qf-q0)/max_iter
-    q_inc = q0
-    q = q0
-
-    return q, q_inc, delta_q
-
-# *******************************************************
-
-def Num_jobs(n_jobs):
+def Get_n_jobs(n_jobs):
 
     if n_jobs == -1:
         jobs = mp.cpu_count()
@@ -441,11 +461,62 @@ def Num_jobs(n_jobs):
     return jobs
 
 # *******************************************************
+# ****** Get_kernel ******
+# *******************************************************
 
-def AF_params(z, xi, xi_decay, iters, AF_name, sense):
+def Get_kernel(x, z, dims, surrogate, kernel, kern_discovery, kern_discovery_evals):
+
+    if kern_discovery == "yes":
+        kernel_ = Kernel_discovery(x, z, dims, surrogate, kern_discovery_evals)
+    elif kern_discovery == "no" and kernel is None:
+        kernel_ = RBF(input_dim=dims, variance=1.0, lengthscale=1.0)
+    else:
+        kernel_ = kernel
+
+    return kernel_
+
+# *******************************************************
+# ****** Iter_params ******
+# *******************************************************
+
+def Iter_params(dims, dims_tau, max_iter, alpha):
+
+    x_symb = sp.Matrix(sp.symbols('x:' + str(dims_tau)))
+    x_symb_names = sp.Matrix(sp.symbols('x:' + str(dims)))
+    flag = 0
+    q0 = 25
+    qf = 95
+    delta_q = (qf-q0)/max_iter
+    q_inc = q0
+    
+    if dims > 1:
+        chi = chi2.ppf(alpha, dims_tau)
+    else:
+        chi = None
+
+    if max_iter < 10:
+        update_param = 1
+    elif max_iter < 51:
+        update_param = int(max_iter/10)
+    elif max_iter < 101:
+        update_param = 5
+    elif max_iter < 501:
+        update_param = 10
+    elif max_iter < 1001:
+        update_param = 50
+    else:
+        pass
+
+    return x_symb, x_symb_names, flag, q0, q_inc, delta_q, chi, update_param
+
+# *******************************************************
+# ****** AF_params ******
+# *******************************************************
+
+def AF_params(z, xi_0, xi_f, xi_decay, iters, AF_name, sense):
 
     if xi_decay == "yes":
-        xi_decay = (1/xi)**(1/iters)
+        xi_decay = (xi_f/xi_0)**(1/iters)
     elif xi_decay == "no":
         xi_decay = 1
     else:
@@ -458,4 +529,4 @@ def AF_params(z, xi, xi_decay, iters, AF_name, sense):
     else:
         pass
 
-    return {'xi': xi, 'xi_decay': xi_decay, 'f_best': f_best, 'AF_name': AF_name}
+    return {'xi': xi_0, 'xi_decay': xi_decay, 'f_best': f_best, 'AF_name': AF_name}

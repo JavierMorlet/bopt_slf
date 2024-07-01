@@ -1,7 +1,9 @@
 import numpy as np
 from scipy.stats import norm
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler
 
+# *******************************************************
+# ****** UCB ******
 # *******************************************************
 
 def UCB(x, xi, model):
@@ -12,6 +14,8 @@ def UCB(x, xi, model):
     return af
 
 # *******************************************************
+# ****** PI ******
+# *******************************************************
 
 def PI(x, x_best, xi, model):
 
@@ -19,12 +23,13 @@ def PI(x, x_best, xi, model):
     with np.errstate(divide='warn'):
         imp = mean - x_best - xi
         Z = imp / std
-        sld = StandardScaler().fit_transform(Z)
-        af = norm.cdf(sld)
+        af = norm.cdf(Z)
         af[std == 0.0] = 0.0
 
     return af
 
+# *******************************************************
+# ****** EI ******
 # *******************************************************
 
 def EI(x, x_best, xi, model):
@@ -33,12 +38,13 @@ def EI(x, x_best, xi, model):
     with np.errstate(divide='warn'):
         imp = mean - x_best - xi
         Z = imp / std
-        sld = StandardScaler().fit_transform(Z)
-        af = imp * norm.cdf(sld) + std * norm.pdf(sld)
+        af = imp * norm.cdf(Z) + std * norm.pdf(Z)
         af[std == 0.0] = 0.0
     
     return af
 
+# *******************************************************
+# ****** PoF ******
 # *******************************************************
 
 def PoF(x, models):
@@ -47,13 +53,16 @@ def PoF(x, models):
 
     for model in models:
         mean, std = model.predict(x)
-        std[(std < 1e-100) & (std > 0)] = 1e-99
-        Z = -mean/std
-        sld = StandardScaler().fit_transform(Z)
-        pof.append(norm.cdf(sld))
+        with np.errstate(divide='warn'):
+            Z = -mean/std
+            af = norm.cdf(Z)
+            af[std == 0.0] = 0.0
+            pof.append(af)
 
     return np.prod(np.array(pof), axis=0)
 
+# *******************************************************
+# ****** Prob_GPC ******
 # *******************************************************
 
 def Prob_GPC(x, model):
@@ -62,6 +71,8 @@ def Prob_GPC(x, model):
 
     return gpc
 
+# *******************************************************
+# ****** AF ******
 # *******************************************************
 
 def AF(x, params, constraints_method, model, models_const):
@@ -86,6 +97,8 @@ def AF(x, params, constraints_method, model, models_const):
             score_const = Prob_GPC(x, models_const)
         else:
             pass
+        scaler = MinMaxScaler()
+        score_const = scaler.fit_transform(score_const)
         score = score.reshape(-1,1)
         score_const = score_const.reshape(-1,1)
         score = score*score_const

@@ -1,18 +1,25 @@
-from types import SimpleNamespace
-import multiprocess as mp
-import numpy as np
-
+# *******************************************************
+# ****** Import libraries ******
 # *******************************************************
 
-def Errors(n_x, n_y, design_type, surrogate, constraints_method, AF_name):
+import numpy as np
+import multiprocess as mp
+from sklearn.impute import SimpleImputer
+from types import SimpleNamespace
+
+# *******************************************************
+# ****** Errors ******
+# *******************************************************
+
+def Errors(d_nc, d_nd, design_type, surrogate, constraints_method, AF_name):
 
     valid_var_type = ["continuous", "integer", "categorical"]
-    valid_design_type = ["random", "LHS", "Sobol", "Halton", "Mesh"]
+    valid_design_type = ["random", "LHS", "Sobol", "Halton"]
     valid_surrogate_name = ["GP", "SGP"]
     valid_constraints_method = ["PoF", "GPC"]
     valid_af_names = ['UCB', 'EI', 'PI']
 
-    if n_x <= 0 and n_y <= 0:
+    if d_nc <= 0 and d_nd <= 0:
         raise ValueError("Not valid variable type, valid names are:", *valid_var_type)
 
     if design_type not in valid_design_type:
@@ -30,70 +37,147 @@ def Errors(n_x, n_y, design_type, surrogate, constraints_method, AF_name):
     return None
 
 # *******************************************************
-
-def Data_eval(x, n_c, dims, enc_cat):
-
-    if enc_cat != None:
-        x_conv = []
-        for i in range(len(enc_cat)):
-            ix_cat = (dims - n_c)
-            x_conv.append(enc_cat[i].inverse_transform(x[:,ix_cat+i].reshape(-1,1)))
-        x_conv = np.array(x_conv).reshape(-1,1)
-        x_eval = np.hstack((x[:, :ix_cat], np.asarray(x_conv, object)))
-    else:
-        x_eval = x
-    
-    return x_eval
-
+# ****** Best_values ******
 # *******************************************************
 
-def Eval_fun(x, n_elements, jobs, function):
+def Flatten(l):
+
+    return [item for sublist in l for item in sublist]
+
+# *******************************************************
+# ****** Eval_fun ******
+# *******************************************************
+
+def Eval_fun(x, jobs, function):
 
     if jobs == 1:
         x_new = np.array(x).reshape(1,-1)
-        z_new = function(x_new)
+        f_new = function(x_new)
     else:
-        x_new = [x[i].reshape(1,-1) for i in range(n_elements)]
+        x_new = [x[i].reshape(1,-1) for i in range(jobs)]
         with mp.Pool(jobs) as pool:
-            z_new = pool.map(function, x_new)
+            f_new = pool.map(function, x_new)
         
-    return z_new
+    return f_new
 
 # *******************************************************
-
-def Eval_const(x, const, n_const, constraints_method):
-    
-    if constraints_method == "PoF":
-        data = [eval(const[i], None, {"x": x}) for i in range(n_const)]
-    elif constraints_method == "GPC":
-        data = [eval(const[i]['constraint'], None, {"x": x}) for i in range(n_const)]
-
-    return np.array(data).reshape(-1, n_const)
-
+# ****** Eval_constrains ******
 # *******************************************************
 
-def Best_values(x, z, sense):
+def Eval_const(x, const, n_const, const_method):
+
+    if const == None: 
+        y = None
+        g = None
+    else:
+        if const_method == "PoF":
+            data = [eval(const[i], None, {"x": x}) for i in range(n_const)]
+        elif const_method == "GPC":
+            data = [eval(const[i]['constraint'], None, {"x": x}) for i in range(n_const)]
+        else:
+            pass
+
+        g = np.array(data).T
+
+        if const_method == "PoF":
+            y = g <= 0
+            y = (y == True).all(axis=1)
+        elif const_method == "GPC":
+            y = (g == True).all(axis=1)
+            g = y.astype(int).reshape(-1,1)
+        else:
+            pass
+
+    return g, y
+
+# *******************************************************
+# ****** Imputation ******
+# *******************************************************
+
+def Imputation(g, const, const_method):
+
+    if const == None: 
+        g_new = None
+    else:
+        if const_method == "PoF":
+            if np.isnan(g).any() == True:
+                imputer = SimpleImputer(missing_values=np.nan, strategy='mean')
+                g_new = imputer.fit_transform(g)
+            else:
+                g_new = g
+        elif const_method == "GPC":
+            g_new = g
+        else:
+            pass
+
+    return g_new
+
+# *******************************************************
+# ****** Best_values ******
+# *******************************************************
+
+def Best_values(x, f, y, sense):
+
+    if y is None:
+        pass
+    else:
+        f = f[y]
+        x = x[y]
 
     if sense == "maximize":
-        ix_best = np.argmax(z)
-        z_best = np.max(z)
+        ix_best = np.argmax(f)
+        f_best = np.max(f)
     elif sense == "minimize":
-        ix_best = np.argmin(z)
-        z_best = np.min(z)
+        ix_best = np.argmin(f)
+        f_best = np.min(f)
     x_best = x[ix_best]
 
-    return x_best, z_best
+    return x_best, f_best
 
 # *******************************************************
+# ****** Check_if_improvement ******
+# *******************************************************
 
-def Regret(z_true, x, n_elements, model):
+def Check_if_improvement(f_new, f_best, jobs, sense):
+
+    if jobs == 1:
+        f_best_new = f_new
+    else:
+        if sense == "maximize":
+            f_best_new = np.max(f_new)
+        elif sense == "minimize":
+            f_best_new = np.min(f_new)
+        else:
+            pass
+    
+    flag = 0
+    
+    if sense == "maximize":
+        if f_best_new > f_best:
+            flag = 1
+    elif sense == "minimize":
+        if f_best_new < f_best:
+            flag = 1
+    else:
+        pass
+
+    return flag
+
+# *******************************************************
+# ****** Regret ******
+# *******************************************************
+
+def Regret(f_true, x, n_elements, model):
+
     # Return an average of the reward
-    z_pred, _ = model.predict(x)
-    rt = [(z_true[i] - z_pred[i]) for i in range(n_elements)]
+    f_pred, _ = model.predict(x)
+    rt = [(f_true[i] - f_pred[i]) for i in range(n_elements)]
     rt = sum(rt)
 
     return rt/n_elements
 
+# *******************************************************
+# ****** Print_header ******
 # *******************************************************
 
 def Print_header(names, x_symb_names, dims):
@@ -111,17 +195,16 @@ def Print_header(names, x_symb_names, dims):
     return header
 
 # *******************************************************
+# ****** Print_results ******
+# *******************************************************
 
-def Print_results(x, z, n_c, dims, enc_cat):
+def Print_results(x, f, cat_val):
 
-    x_eval = Data_eval(x.reshape(1,-1), n_c, dims, enc_cat)
-
-    if enc_cat is None:
-        x = x_eval.reshape(-1)
+    if cat_val == 0:
+        x = x.reshape(-1)
         x_print = ["%.5f" % value if 1e-3 < abs(value) < 1e3 else "%0.1e" % value for value in x]
     else:
-        x = x_eval
-        x = x[0]
+        #x = x[0]
         x_print = [] 
         for value in x:
             if type(value) == str:
@@ -132,17 +215,19 @@ def Print_results(x, z, n_c, dims, enc_cat):
                 else:
                     x_print.append("%0.1e" % value)
     
-    z_print = "%.5f" % z if 1e-3 < abs(z) < 1e3 else "%0.1e" % z
+    f_print = "%.5f" % f if 1e-3 < abs(f) < 1e3 else "%0.1e" % f
         
-    return x_print, z_print
+    return x_print, f_print
 
 # *******************************************************
+# ****** Create_results ******
+# *******************************************************
 
-def Create_results(x_best, z_best, x, z, x_l, x_u, dims, max_iter, points, design, af_params, constraints_method, rt, models_const, model):
+def Create_results(x_best, f_best, x, f, x_l, x_u, dims, max_iter, points, design, af_params, constraints_method, rt, models_const, model):
 
-    res = {'x_best': x_best, 'f_best': z_best, 
-           'x_init': x[0:points], 'f_init': z[0:points], 
-           'x_iters': x[points:-1], 'f_iters': z[points:-1],
+    res = {'x_best': x_best, 'f_best': f_best, 
+           'x_init': x[0:points], 'f_init': f[0:points], 
+           'x_iters': x[points:-1], 'f_iters': f[points:-1],
            'x_l': x_l, 'x_u': x_u, 
            'dims': dims,
            'iters': max_iter, 
